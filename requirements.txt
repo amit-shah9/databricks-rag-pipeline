@@ -1,0 +1,9 @@
+databricks-connect==16.4.*
+databricks-sdk
+databricks-vectorsearch
+databricks-agents
+mlflow
+databricks-langchain
+langgraph
+python-dotenv
+requests

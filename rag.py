@@ -32,28 +32,16 @@ def decompose(question):
 
 
 def retrieve(question, k=4, candidates=20):
-    """Decomposition + reranking. Decompose into sub-questions; for each,
-    over-retrieve a wide pool and rerank; pool, dedupe, keep best k by score.
-    Reranking against the ORIGINAL question cuts the dilution decomposition adds.
-    """
-    seen = {}
-    for sub in decompose(question):
-        results = index.similarity_search(
-            query_text=sub,
-            columns=["chunk_id", "title", "text"],
-            num_results=candidates,
-            query_type="ANN",
-            reranker=DatabricksReranker(columns_to_rerank=["text"]),
-            disable_notice=True,
-        )
-        for row in results["result"]["data_array"]:
-            cid = row[0]
-            # keep the highest rerank score if a chunk appears for multiple subs
-            if cid not in seen or row[-1] > seen[cid][-1]:
-                seen[cid] = row
-    # final sort by rerank score, keep best k
-    pooled = sorted(seen.values(), key=lambda r: r[-1], reverse=True)
-    return pooled[:k]
+    """Reranking only: over-retrieve wide, rerank, keep best k."""
+    results = index.similarity_search(
+        query_text=question,
+        columns=["chunk_id", "title", "text"],
+        num_results=candidates,
+        query_type="ANN",
+        reranker=DatabricksReranker(columns_to_rerank=["text"]),
+        disable_notice=True,
+    )
+    return results["result"]["data_array"][:k]
 
 
 def generate(question, chunks):

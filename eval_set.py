@@ -27,12 +27,12 @@ eval_rows = [
     ),
     (
         "Under the EEG, how does the Federal Network Agency help implement Germany's renewable-electricity expansion targets?",
-        "Under the EEG, the Federal Network Agency runs the auctions/tenders for renewable installations and sets the auctioned capacity to the trajectory needed for Germany's renewables-share target, and it also sets payment levels, monitors the EEG equalisation scheme, and publishes newly installed renewable capacity each month.",
+        "Under the EEG, the Federal Network Agency conducts the auction process for renewable energy installations, determines the level of financial payment for renewable installations, monitors the nationwide EEG equalisation scheme between distribution network operators, transmission system operators, and electricity suppliers, and publishes the capacity of newly installed renewable energy installations each month.",
         "answerable",
     ),
     (
         "How does the Renewable Energy Sources Act relate to the Energiewende?",
-        "The EEG is the main legislative instrument used to expand renewable electricity toward the goals of the Energiewende: the Energiewende sets the overall direction and targets, while the EEG (through feed-in tariffs and later auctions and deployment corridors) is the mechanism that grew renewable generation.",
+        "The EEG is the legislative mechanism that drives renewable-electricity expansion as part of the Energiewende. The 2014 revised EEG set deployment corridors defining how much renewable energy is to be expanded and shifted funding from government-fixed feed-in tariffs to auction-determined rates. This market redesign was seen as a key part of the Energiewende.",
         "answerable",
     ),
     (

@@ -7,7 +7,7 @@ from rag import retrieve, generate, workspace_client
 
 spark = DatabricksSession.builder.clusterId(config.CLUSTER_ID).getOrCreate()
 set_deployments_target("databricks")
-JUDGE_MODEL = f"endpoints:/{config.CHAT_ENDPOINT}"
+JUDGE_MODEL = "endpoints:/databricks-claude-sonnet-4-5"   # was haiku — stronger, more consistent judge
 
 eval_pdf = spark.sql(
     f"SELECT request, expected_response, category FROM {config.FQ_SCHEMA}.eval_set"

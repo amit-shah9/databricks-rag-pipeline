@@ -8,19 +8,53 @@ workspace_client, vector_search_client = get_clients()
 index = vector_search_client.get_index(config.VS_ENDPOINT, config.INDEX_NAME)
 
 
-def retrieve(question, k=3):
-    """Retrieve the top-k most similar chunks for a question."""
-    results = index.similarity_search(
-        query_text=question,
-        columns=["chunk_id", "title", "text"],
-        num_results=k,
-        query_type="ANN",
-        # Reranker disabled for now — it underperformed on oversized chunks
-        # (only reads first ~2000 chars; our chunks were ~3000). Re-enable
-        # after re-chunking smaller. See chunk.py.
-        # reranker=DatabricksReranker(columns_to_rerank=["text"]),
+def decompose(question):
+    """Split a question into focused sub-questions for retrieval.
+
+    Multi-hop questions need facts from different places; one search misses a
+    side. Sub-questions let each piece be retrieved on its own. Simple questions
+    return unchanged.
+    """
+    prompt = (
+        "Break the following question into 1-3 focused sub-questions that together "
+        "would retrieve everything needed to answer it. If it is already simple, "
+        "return it unchanged as a single line. Return ONLY the sub-questions, one "
+        "per line, no numbering.\n\n"
+        f"Question: {question}"
     )
-    return results["result"]["data_array"]
+    resp = workspace_client.serving_endpoints.query(
+        name=config.CHAT_ENDPOINT,
+        messages=[ChatMessage(role=ChatMessageRole.USER, content=prompt)],
+        max_tokens=200,
+    )
+    subs = [l.strip() for l in resp.choices[0].message.content.splitlines() if l.strip()]
+    return subs or [question]
+
+
+def retrieve(question, k=4, candidates=20):
+    """Decomposition + reranking. Decompose into sub-questions; for each,
+    over-retrieve a wide pool and rerank; pool, dedupe, keep best k by score.
+    Reranking against the ORIGINAL question cuts the dilution decomposition adds.
+    """
+    seen = {}
+    for sub in decompose(question):
+        results = index.similarity_search(
+            query_text=sub,
+            columns=["chunk_id", "title", "text"],
+            num_results=candidates,
+            query_type="ANN",
+            reranker=DatabricksReranker(columns_to_rerank=["text"]),
+            disable_notice=True,
+        )
+        for row in results["result"]["data_array"]:
+            cid = row[0]
+            # keep the highest rerank score if a chunk appears for multiple subs
+            if cid not in seen or row[-1] > seen[cid][-1]:
+                seen[cid] = row
+    # final sort by rerank score, keep best k
+    pooled = sorted(seen.values(), key=lambda r: r[-1], reverse=True)
+    return pooled[:k]
+
 
 def generate(question, chunks):
     """Generate an answer using only the retrieved context."""

@@ -42,7 +42,7 @@ FQ_SCHEMA = f"{CATALOG}.{SCHEMA}"
 # Tables and Vector Search index created by the pipeline.
 DOCUMENTS_TABLE = f"{FQ_SCHEMA}.documents"
 CHUNKS_TABLE = f"{FQ_SCHEMA}.chunks"
-INDEX_NAME = f"{FQ_SCHEMA}.chunks_index"
+INDEX_NAME = os.environ.get("INDEX_NAME", f"{FQ_SCHEMA}.chunks_index")
 
 
 # Vector Search settings.

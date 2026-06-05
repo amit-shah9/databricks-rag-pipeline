@@ -4,6 +4,7 @@ from databricks.connect import DatabricksSession
 from mlflow.deployments import set_deployments_target
 from mlflow.genai.scorers import Correctness, RelevanceToQuery, Guidelines
 from rag import retrieve, generate, workspace_client
+from agent import agentic_ask
 
 spark = DatabricksSession.builder.clusterId(config.CLUSTER_ID).getOrCreate()
 set_deployments_target("databricks")
@@ -28,8 +29,8 @@ def to_eval_data(pdf):
 
 @mlflow.trace
 def predict_fn(question):
-    chunks = retrieve(question)
-    return generate(question, chunks)
+    answer, _chunks, _grounded = agentic_ask(question, verbose=False)
+    return answer
 
 mlflow.set_tracking_uri("databricks")
 mlflow.set_experiment(f"/Users/{workspace_client.current_user.me().user_name}/rag_eval")

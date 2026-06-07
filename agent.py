@@ -1,7 +1,216 @@
 import config
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 from rag import retrieve, generate, decompose, rewrite_query, workspace_client
+from databricks.connect import DatabricksSession
+_spark = DatabricksSession.builder.clusterId(config.CLUSTER_ID).getOrCreate()
+from openai import OpenAI
 
+def web_search(query, max_results=3):
+    """Tool: search the live web for current information not in the corpus."""
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        from duckduckgo_search import DDGS   # older package name
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if not results:
+            return "No web results found."
+        return "\n\n".join(
+            f"{r.get('title','')}: {r.get('body','')}" for r in results
+        )
+    except Exception as e:
+        return f"Web search failed: {e}"
+
+WEB_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "Search the live web for CURRENT information not in the document corpus "
+            "and not in the energy-metrics table — e.g. recent news, events after the "
+            "documents were written, or general facts outside German energy policy. "
+            "Use only when neither the documents nor the energy data can answer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "the web search query"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+def search_documents(query):
+    """Tool: retrieve relevant passages from the German energy market document corpus."""
+    chunks = retrieve(query)   # your active reranking retrieval
+    return "\n\n".join(f"[{c[0]}] {c[2]}" for c in chunks)
+
+DOC_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_documents",
+        "description": (
+            "Search the German energy market document corpus (Energiewende, "
+            "electricity sector, Federal Network Agency, Renewable Energy Sources "
+            "Act). Use for any question about energy policy, history, regulation, "
+            "the EEG, the Energiewende, or how the German energy system works."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "the search query"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+def query_energy_data(metric, date=None):
+    """Tool: query the live_energy_metrics Delta table for a metric (optionally by date)."""
+    table = f"{config.FQ_SCHEMA}.live_energy_metrics"
+    q = f"SELECT date, metric, value FROM {table} WHERE metric = '{metric}'"
+    if date:
+        q += f" AND date = '{date}'"
+    rows = _spark.sql(q).collect()
+    if not rows:
+        return f"No data found for metric '{metric}'."
+    return "; ".join(f"{r['date']}: {r['metric']}={r['value']}" for r in rows)
+
+# Tool schema the LLM sees (function-calling description)
+SQL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "query_energy_data",
+        "description": (
+            "Query current/live German energy metrics NOT in the document corpus: "
+            "day_ahead_price_eur_mwh, wind_generation_gw, solar_generation_gw, "
+            "co2_intensity_g_kwh. Use this for questions about current prices or "
+            "live generation figures."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string",
+                           "description": "one of: day_ahead_price_eur_mwh, wind_generation_gw, solar_generation_gw, co2_intensity_g_kwh"},
+                "date": {"type": "string", "description": "optional date YYYY-MM-DD"},
+            },
+            "required": ["metric"],
+        },
+    },
+}
+
+TOOL_FUNCS = {
+    "query_energy_data": query_energy_data,
+    "search_documents": search_documents,
+    "web_search": web_search,
+}
+
+ALL_TOOLS = [DOC_TOOL, SQL_TOOL, WEB_TOOL]
+
+GROUNDING_SYSTEM = (
+    "You are an assistant on the German energy market. You must answer ONLY using "
+    "information returned by your tools. Use search_documents for questions about "
+    "energy policy/history/regulation, query_energy_data for current prices or live "
+    "generation figures, and web_search for current information outside the corpus "
+    "(recent news, facts the other tools can't provide). Do NOT answer from your own "
+    "knowledge. If the tools do not return enough information, say so."
+)
+
+def grounded_agent_ask(question, max_tool_calls=4, verbose=False):
+    """Unified grounded agent: LLM chooses among document-search and SQL tools,
+    answers only from tool results, then output is citation-gated."""
+    import json
+    messages = [
+        {"role": "system", "content": GROUNDING_SYSTEM},
+        {"role": "user", "content": question},
+    ]
+    tool_outputs = []   # accumulate everything tools returned, for the gate
+    for _ in range(max_tool_calls + 1):
+        resp = _openai_client.chat.completions.create(
+            model=config.CHAT_ENDPOINT,
+            messages=messages,
+            tools=ALL_TOOLS,
+            max_tokens=600,
+        )
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            answer = msg.content
+            break
+        messages.append({
+            "role": "assistant", "content": msg.content,
+            "tool_calls": [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ],
+        })
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments)
+            result = TOOL_FUNCS[tc.function.name](**args)
+            tool_outputs.append(str(result))
+            if verbose:
+                print(f"  [tool] {tc.function.name}({args}) -> {str(result)[:80]}")
+            messages.append({
+                "role": "tool", "tool_call_id": tc.id, "content": str(result),
+            })
+    else:
+        answer = "Stopped after max tool calls."
+
+    # citation gate: answer must be supported by what the tools returned
+    if tool_outputs:
+        grounded, _ = citation_gate(question, answer,
+                                    [("tool", "", "\n\n".join(tool_outputs), 0)])
+        if verbose:
+            print(f"  [gate] grounded={grounded}")
+        if not grounded:
+            answer = ("I don't have enough supported information from my tools to "
+                      "answer that fully and accurately.")
+    return answer
+
+# OpenAI-compatible client pointed at Databricks serving endpoints.
+# Databricks exposes an OpenAI-compatible API at /serving-endpoints.
+_openai_client = OpenAI(
+    api_key=workspace_client.config.oauth_token().access_token,
+    base_url=f"{workspace_client.config.host}/serving-endpoints",
+)
+
+def tool_calling_ask(question, max_tool_calls=3):
+    """Agent with function calling via the OpenAI-compatible Databricks API.
+    The LLM decides whether to call the SQL tool."""
+    import json
+    messages = [{"role": "user", "content": question}]
+    for _ in range(max_tool_calls + 1):
+        resp = _openai_client.chat.completions.create(
+            model=config.CHAT_ENDPOINT,
+            messages=messages,
+            tools=[SQL_TOOL],
+            max_tokens=500,
+        )
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            return msg.content                       # answered, no tool needed
+        # record the assistant's tool-call request
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ],
+        })
+        # execute each tool call, feed results back
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments)
+            result = TOOL_FUNCS[tc.function.name](**args)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": str(result),
+            })
+    return "Stopped after max tool calls."
 
 def grade_chunks(question, chunks):
     """Grade whether the context contains the SPECIFIC facts for a complete answer.
@@ -35,14 +244,16 @@ def grade_chunks(question, chunks):
 
 
 def citation_gate(question, answer, chunks):
-    """Check that every claim in the answer is supported by the chunks.
-    Returns (grounded: bool, problems: str). This is what keeps the agent honest:
-    it must not assert beyond what the retrieved context supports."""
+    """Check that every claim in the answer is supported by the context.
+    Tolerant of formatting/representation differences (units, rounding, field
+    names) — judge whether the FACTS match, not the exact wording."""
     context = "\n\n".join(f"[{c[0]}] {c[2]}" for c in chunks)
     prompt = (
-        "Check whether EVERY factual claim in the ANSWER is supported by the "
-        "CONTEXT below. If any claim is not supported by the context, the answer "
-        "fails.\n\n"
+        "Check whether the factual claims in the ANSWER are supported by the "
+        "CONTEXT. Treat differently-formatted representations of the same fact as "
+        "supported: e.g. 'day_ahead_price_eur_mwh=79.1' supports '€79.10 per MWh'; "
+        "ignore units, rounding, field-name vs prose differences. Only fail if the "
+        "answer asserts something the context genuinely does not contain.\n\n"
         "Respond in EXACTLY this format:\n"
         "GROUNDED: yes|no\n"
         "UNSUPPORTED: <unsupported claims, or 'none'>\n\n"

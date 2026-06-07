@@ -248,7 +248,7 @@ def retrieve(question, **kwargs):
     # return retrieve_hyde(question, **kwargs)
     # return retrieve_rewrite(question, **kwargs)
     # return retrieve_metadata(question, **kwargs)
-    # return retrieve_small_to_big(question, **kwargs)   # needs chunks_small_to_big_index
+    #    # needs chunks_small_to_big_index
 
 
 def generate(question, chunks):

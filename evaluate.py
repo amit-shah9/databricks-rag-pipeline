@@ -11,7 +11,7 @@ set_deployments_target("databricks")
 JUDGE_MODEL = "endpoints:/databricks-claude-sonnet-4-5"   # was haiku — stronger, more consistent judge
 
 eval_pdf = spark.sql(
-    f"SELECT request, expected_response, category FROM {config.FQ_SCHEMA}.eval_set"
+    f"SELECT request, required_facts, optional_facts, category FROM {config.FQ_SCHEMA}.eval_set"
 ).toPandas()
 
 # Split by category: answerable vs out-of-scope.
@@ -22,10 +22,15 @@ def to_eval_data(pdf):
     return [
         {
             "inputs": {"question": r["request"]},
-            "expectations": {"expected_response": r["expected_response"]},
+            "expectations": {"expected_facts": list(r["required_facts"])},
         }
         for _, r in pdf.iterrows()
     ]
+
+""" @mlflow.trace
+def predict_fn(question):
+    chunks = retrieve(question)
+    return generate(question, chunks) """
 
 @mlflow.trace
 def predict_fn(question):

@@ -118,56 +118,76 @@ GROUNDING_SYSTEM = (
     "knowledge. If the tools do not return enough information, say so."
 )
 
-def grounded_agent_ask(question, max_tool_calls=4, verbose=False):
-    """Unified grounded agent: LLM chooses among document-search and SQL tools,
-    answers only from tool results, then output is citation-gated."""
+def grounded_agent_ask(question, max_tool_calls=4, max_gate_retries=2, verbose=False):
+    """Unified grounded agent with citation-gate loop-back: if the gate fails,
+    retrieve more and re-answer (up to max_gate_retries) before refusing."""
     import json
-    messages = [
-        {"role": "system", "content": GROUNDING_SYSTEM},
-        {"role": "user", "content": question},
-    ]
-    tool_outputs = []   # accumulate everything tools returned, for the gate
-    for _ in range(max_tool_calls + 1):
-        resp = _openai_client.chat.completions.create(
-            model=config.CHAT_ENDPOINT,
-            messages=messages,
-            tools=ALL_TOOLS,
-            max_tokens=600,
-        )
-        msg = resp.choices[0].message
-        if not msg.tool_calls:
-            answer = msg.content
-            break
-        messages.append({
-            "role": "assistant", "content": msg.content,
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in msg.tool_calls
-            ],
-        })
-        for tc in msg.tool_calls:
-            args = json.loads(tc.function.arguments)
-            result = TOOL_FUNCS[tc.function.name](**args)
-            tool_outputs.append(str(result))
-            if verbose:
-                print(f"  [tool] {tc.function.name}({args}) -> {str(result)[:80]}")
-            messages.append({
-                "role": "tool", "tool_call_id": tc.id, "content": str(result),
-            })
-    else:
-        answer = "Stopped after max tool calls."
 
-    # citation gate: answer must be supported by what the tools returned
-    if tool_outputs:
-        grounded, _ = citation_gate(question, answer,
-                                    [("tool", "", "\n\n".join(tool_outputs), 0)])
+    def run_tools_and_answer(user_msg, extra_context_hint=None):
+        """One pass: let the LLM call tools and produce an answer. Returns
+        (answer, tool_outputs)."""
+        sys = GROUNDING_SYSTEM
+        if extra_context_hint:
+            sys += ("\n\nThe previous answer had unsupported claims: "
+                    f"{extra_context_hint}. Use your tools to find support for "
+                    "those specific claims, or omit them.")
+        messages = [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": user_msg},
+        ]
+        outs = []
+        for _ in range(max_tool_calls + 1):
+            resp = _openai_client.chat.completions.create(
+                model=config.CHAT_ENDPOINT, messages=messages,
+                tools=ALL_TOOLS, max_tokens=600,
+            )
+            msg = resp.choices[0].message
+            if not msg.tool_calls:
+                return msg.content, outs
+            messages.append({
+                "role": "assistant", "content": msg.content,
+                "tool_calls": [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name,
+                                  "arguments": tc.function.arguments}}
+                    for tc in msg.tool_calls
+                ],
+            })
+            for tc in msg.tool_calls:
+                args = json.loads(tc.function.arguments)
+                result = TOOL_FUNCS[tc.function.name](**args)
+                outs.append(str(result))
+                if verbose:
+                    print(f"  [tool] {tc.function.name}({args}) -> {str(result)[:70]}")
+                messages.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": str(result)})
+        return "Stopped after max tool calls.", outs
+
+    # initial pass
+    answer, tool_outputs = run_tools_and_answer(question)
+
+    # citation-gate loop-back
+    for attempt in range(max_gate_retries + 1):
+        if not tool_outputs:
+            break
+        grounded, detail = citation_gate(
+            question, answer, [("tool", "", "\n\n".join(tool_outputs), 0)])
         if verbose:
-            print(f"  [gate] grounded={grounded}")
-        if not grounded:
-            answer = ("I don't have enough supported information from my tools to "
-                      "answer that fully and accurately.")
-    return answer
+            print(f"  [gate attempt {attempt}] grounded={grounded}")
+        if grounded:
+            return answer
+        if attempt == max_gate_retries:
+            break   # out of retries -> refuse below
+        # loop back: extract what was unsupported, retrieve to fill it, re-answer
+        unsupported = detail.split("UNSUPPORTED:", 1)[-1].strip()
+        if verbose:
+            print(f"  [gate loop-back] retrying to ground: {unsupported[:70]!r}")
+        new_answer, new_outs = run_tools_and_answer(question, extra_context_hint=unsupported)
+        answer = new_answer
+        tool_outputs += new_outs   # accumulate context across attempts
+
+    return ("I don't have enough supported information from my tools to answer "
+            "that fully and accurately.")
 
 # OpenAI-compatible client pointed at Databricks serving endpoints.
 # Databricks exposes an OpenAI-compatible API at /serving-endpoints.

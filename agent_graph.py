@@ -12,9 +12,10 @@ class AgentState(TypedDict):
     chunks: List[Any]          # accumulated chunks across passes
     passes: int                # how many retrieval passes so far
     max_passes: int
+    sufficient: bool          # are the chunks sufficient to answer?
     answer: str
     grounded: bool
-    sufficient: bool
+    
 
 
 # ---- 2. NODES: each takes state, returns state updates ----

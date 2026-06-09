@@ -1,11 +1,23 @@
 import config
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 from rag import retrieve, generate, decompose, rewrite_query, workspace_client
-from databricks.connect import DatabricksSession
-_spark = DatabricksSession.builder.clusterId(config.CLUSTER_ID).getOrCreate()
+""" from databricks.connect import DatabricksSession
+_spark = DatabricksSession.builder.clusterId(config.CLUSTER_ID).getOrCreate() """
 from openai import OpenAI
 import mlflow
 mlflow.openai.autolog()
+
+from databricks.connect import DatabricksSession
+
+_spark = None
+def _get_spark():
+    """Lazily create the Spark session on first use. Deferring this means
+    importing agent.py doesn't require Spark — important for serving
+    environments where a Spark session can't be created at import time."""
+    global _spark
+    if _spark is None:
+        _spark = DatabricksSession.builder.clusterId(config.CLUSTER_ID).getOrCreate()
+    return _spark
 
 @mlflow.trace(name="web_search", span_type="TOOL")
 def web_search(query, max_results=3):
@@ -73,12 +85,16 @@ DOC_TOOL = {
 
 @mlflow.trace(name="query_energy_data", span_type="TOOL")
 def query_energy_data(metric, date=None):
-    """Tool: query the live_energy_metrics Delta table for a metric (optionally by date)."""
+    """Tool: query the live_energy_metrics Delta table."""
+    try:
+        spark = _get_spark()
+    except Exception as e:
+        return f"Live data tool unavailable in this environment: {e}"
     table = f"{config.FQ_SCHEMA}.live_energy_metrics"
     q = f"SELECT date, metric, value FROM {table} WHERE metric = '{metric}'"
     if date:
         q += f" AND date = '{date}'"
-    rows = _spark.sql(q).collect()
+    rows = spark.sql(q).collect()
     if not rows:
         return f"No data found for metric '{metric}'."
     return "; ".join(f"{r['date']}: {r['metric']}={r['value']}" for r in rows)

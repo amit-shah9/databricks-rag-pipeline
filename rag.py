@@ -2,7 +2,7 @@ import config
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 from vs_client import get_clients
 from databricks.vector_search.reranker import DatabricksReranker
-
+import mlflow
 
 workspace_client, vector_search_client = get_clients()
 index = vector_search_client.get_index(config.VS_ENDPOINT, config.INDEX_NAME)
@@ -239,6 +239,7 @@ def retrieve_small_to_big(question, k=4, candidates=20):
 # ACTIVE STRATEGY — swap this one line to test a different retriever.
 # Make sure INDEX_NAME (env var) matches the index the strategy expects.
 # =====================================================================
+@mlflow.trace(name="retrieve", span_type="RETRIEVER")
 def retrieve(question, **kwargs):
     return retrieve_reranking(question, **kwargs)
     # return retrieve_plain(question, **kwargs)
@@ -250,7 +251,7 @@ def retrieve(question, **kwargs):
     # return retrieve_metadata(question, **kwargs)
     #    # needs chunks_small_to_big_index
 
-
+@mlflow.trace(name="generate", span_type="LLM")
 def generate(question, chunks):
     """Generate an answer using only the retrieved context."""
     context = "\n\n".join(

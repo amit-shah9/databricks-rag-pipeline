@@ -4,7 +4,10 @@ from rag import retrieve, generate, decompose, rewrite_query, workspace_client
 from databricks.connect import DatabricksSession
 _spark = DatabricksSession.builder.clusterId(config.CLUSTER_ID).getOrCreate()
 from openai import OpenAI
+import mlflow
+mlflow.openai.autolog()
 
+@mlflow.trace(name="web_search", span_type="TOOL")
 def web_search(query, max_results=3):
     """Tool: search the live web for current information not in the corpus."""
     try:
@@ -42,6 +45,7 @@ WEB_TOOL = {
     },
 }
 
+@mlflow.trace(name="search_documents", span_type="TOOL")
 def search_documents(query):
     """Tool: retrieve relevant passages from the German energy market document corpus."""
     chunks = retrieve(query)   # your active reranking retrieval
@@ -67,6 +71,7 @@ DOC_TOOL = {
     },
 }
 
+@mlflow.trace(name="query_energy_data", span_type="TOOL")
 def query_energy_data(metric, date=None):
     """Tool: query the live_energy_metrics Delta table for a metric (optionally by date)."""
     table = f"{config.FQ_SCHEMA}.live_energy_metrics"
@@ -118,6 +123,7 @@ GROUNDING_SYSTEM = (
     "knowledge. If the tools do not return enough information, say so."
 )
 
+@mlflow.trace(name="grounded_agent_ask", span_type="AGENT")
 def grounded_agent_ask(question, max_tool_calls=4, max_gate_retries=2, verbose=False):
     """Unified grounded agent with citation-gate loop-back: if the gate fails,
     retrieve more and re-answer (up to max_gate_retries) before refusing."""
@@ -232,6 +238,7 @@ def tool_calling_ask(question, max_tool_calls=3):
             })
     return "Stopped after max tool calls."
 
+@mlflow.trace(name="grade_chunks", span_type="LLM")
 def grade_chunks(question, chunks):
     """Grade whether the context contains the SPECIFIC facts for a complete answer.
     Returns (sufficient: bool, missing: str). 'missing' is phrased as a search
@@ -262,7 +269,7 @@ def grade_chunks(question, chunks):
             missing = line.split(":", 1)[1].strip()
     return sufficient, missing
 
-
+@mlflow.trace(name="citation_gate", span_type="LLM")
 def citation_gate(question, answer, chunks):
     """Check that every claim in the answer is supported by the context.
     Tolerant of formatting/representation differences (units, rounding, field
@@ -290,7 +297,7 @@ def citation_gate(question, answer, chunks):
     grounded = "grounded: yes" in text.lower()
     return grounded, text.strip()
 
-
+@mlflow.trace(name="agentic_ask", span_type="CHAIN")
 def agentic_ask(question, max_passes=3, k=4, verbose=True):
     """Agentic RAG: retrieve, grade for completeness, re-retrieve to fill gaps
     (accumulating chunks), then generate and citation-gate. Bounded by max_passes."""
